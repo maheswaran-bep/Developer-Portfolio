@@ -26,6 +26,46 @@ pipeline {
             }
         }
 
+        stage('Prepare Environment') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'portfolio-mysql-root-password', variable: 'MYSQL_ROOT_PASSWORD'),
+                    string(credentialsId: 'portfolio-mysql-user', variable: 'MYSQL_USER'),
+                    string(credentialsId: 'portfolio-mysql-password', variable: 'MYSQL_PASSWORD'),
+                    string(credentialsId: 'portfolio-session-secret', variable: 'SESSION_SECRET'),
+                    string(credentialsId: 'portfolio-admin-password', variable: 'ADMIN_PASSWORD'),
+                    string(credentialsId: 'portfolio-admin-email', variable: 'ADMIN_EMAIL')
+                ]) {
+                    sh '''
+                        set +x
+
+                        cat > .env <<EOF
+MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+MYSQL_USER=${MYSQL_USER}
+MYSQL_PASSWORD=${MYSQL_PASSWORD}
+SESSION_SECRET=${SESSION_SECRET}
+ADMIN_PASSWORD=${ADMIN_PASSWORD}
+ADMIN_EMAIL=${ADMIN_EMAIL}
+EOF
+
+                        chmod 600 .env
+
+                        echo "Production environment file created."
+                    '''
+                }
+            }
+        }
+
+        stage('Validate Compose') {
+            steps {
+                sh '''
+                    echo "=== Validating Docker Compose ==="
+                    docker compose config -q
+                    echo "Docker Compose configuration is valid."
+                '''
+            }
+        }
+
         stage('Docker Build') {
             steps {
                 sh '''
@@ -47,21 +87,45 @@ pipeline {
             }
         }
 
-        stage('Verify Deployment') {
+        stage('Verify Containers') {
             steps {
                 sh '''
                     echo "=== Container Status ==="
                     docker compose ps
 
                     echo "=== Waiting for Application ==="
-                    sleep 15
+                    sleep 20
 
-                    echo "=== Testing Frontend ==="
-                    curl -f http://localhost:8084/
+                    echo "=== Backend Logs ==="
+                    docker compose logs --tail=50 backend
+
+                    echo "=== Frontend Logs ==="
+                    docker compose logs --tail=30 frontend
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    echo "=== Checking Frontend Container ==="
+
+                    FRONTEND_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' portfolio-frontend)
+
+                    echo "Frontend container IP: ${FRONTEND_IP}"
+
+                    docker run --rm \
+                        --network developer-portfolio_default \
+                        curlimages/curl:latest \
+                        -f http://portfolio-frontend/
 
                     echo ""
-                    echo "=== Testing Backend Through Nginx ==="
-                    curl -f http://localhost:8084/api/ || true
+                    echo "=== Checking Backend Container ==="
+
+                    docker run --rm \
+                        --network developer-portfolio_default \
+                        curlimages/curl:latest \
+                        -f http://portfolio-backend:8000/
 
                     echo ""
                     echo "=== Deployment Verification Complete ==="
@@ -87,6 +151,7 @@ pipeline {
 
         always {
             sh '''
+                rm -f .env || true
                 docker compose ps || true
             '''
         }
